@@ -19,8 +19,9 @@
 
 ;;; Commentary:
 
-;; This file adds support for Privategpt's Messages API and
-;; Perplexity's Citations feature to gptel
+;; This file adds support for Privategpt's Messages API,
+;; Perplexity's Citations feature, the Deepseek and xAI APIs, and
+;; OpenCode Go to gptel
 
 ;;; Code:
 (require 'cl-generic)
@@ -31,6 +32,7 @@
   (require 'gptel-openai))
 
 (defvar json-object-type)
+(defvar gptel-version)
 
 (declare-function prop-match-value "text-property-search" nil t)
 (declare-function text-property-search-backward "text-property-search")
@@ -475,6 +477,315 @@ HEADER, HOST, PROTOCOL, ENDPOINT and MODELS) are optional; for
 their meanings see `gptel-make-openai'."
   (declare (indent 1))
   (let ((backend (gptel--make-deepseek
+                  :name name
+                  :host host
+                  :header header
+                  :key key
+                  :models (gptel--process-models models)
+                  :protocol protocol
+                  :endpoint endpoint
+                  :stream stream
+                  :request-params request-params
+                  :curl-args curl-args
+                  :url (concat protocol "://" host endpoint))))
+    (setf (alist-get name gptel--known-backends nil nil #'equal) backend)
+    backend))
+
+
+;;; OpenCode Go
+(cl-defstruct (gptel-opencode (:include gptel-openai)
+                              (:copier nil)
+                              (:constructor gptel--make-opencode)))
+
+(defvar-local gptel-opencode-session-id nil
+  "Session ID used for OpenCode Go requests from the current buffer.
+
+OpenCode Go requires every request to carry a stable identifier
+for its conversation in the \"x-opencode-session\" header, which
+it uses for request routing and prompt caching.  The ID is
+generated on the first request from a buffer and reused for all
+subsequent requests from it.  Set this variable to override the
+generated value.")
+
+(defun gptel--opencode-buffer-session (buffer)
+  "Return the OpenCode session ID for BUFFER, generating it if needed."
+  (with-current-buffer buffer
+    (or gptel-opencode-session-id
+        (setq gptel-opencode-session-id
+              (format "gptel-%s"
+                      (md5 (format "%s-%s-%s"
+                                   (buffer-name)
+                                   (float-time)
+                                   (random))))))))
+
+(defun gptel--opencode-header (info)
+  "Return the HTTP headers for an OpenCode Go request.
+
+INFO is the gptel request plist.  Besides the API key, send the
+client identification and per-conversation session headers that
+OpenCode Go requires."
+  (append
+   (when-let* ((key (gptel--get-api-key)))
+     `(("Authorization" . ,(concat "Bearer " key))))
+   `(("User-Agent" . ,(format "gptel/%s"
+                              (if (boundp 'gptel-version) gptel-version "unknown")))
+     ("x-opencode-session" . ,(gptel--opencode-buffer-session
+                               (or (plist-get info :buffer)
+                                   (current-buffer)))))))
+
+(defconst gptel--opencode-models
+  '((deepseek-v4.1-flash
+     :description "DeepSeek V4.1 Flash model for reasoning and agentic coding"
+     :capabilities (media tool-use json reasoning)
+     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
+     :context-window 1000
+     :input-cost 0.15
+     :output-cost 0.6)
+    (deepseek-v4-pro
+     :description "Flagship DeepSeek model for coding, reasoning, and agentic work"
+     :capabilities (tool-use json reasoning)
+     :context-window 1000
+     :input-cost 0.66
+     :output-cost 1.98)
+    (glm-5.3-flash
+     :description "Native multimodal GLM model for efficient coding and long-horizon agent tasks"
+     :capabilities (media tool-use json reasoning)
+     :mime-types ("image/jpeg" "image/png")
+     :context-window 1000
+     :input-cost 0.15
+     :output-cost 0.5)
+    (glm-5.3
+     :description "Flagship GLM model for long-horizon coding, agents, and complex project delivery"
+     :capabilities (tool-use json reasoning)
+     :context-window 1000
+     :input-cost 1.4
+     :output-cost 4.4)
+    (glm-5.2
+     :description "Open flagship GLM for long-horizon coding agents and million-token context work"
+     :capabilities (tool-use json reasoning)
+     :context-window 1000
+     :input-cost 1.4
+     :output-cost 4.4)
+    (kimi-k3.1-pro
+     :description "Multimodal Kimi model with 1M context and always-on reasoning for coding, 3D creation, financial research, and agentic work"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "image/bmp" "image/heic" "image/heif")
+     :context-window 1024
+     :input-cost 2
+     :output-cost 10)
+    (kimi-k3
+     :description "Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "image/bmp" "image/heic" "image/heif")
+     :context-window 1024
+     :input-cost 3
+     :output-cost 15)
+    (kimi-k2.7-code
+     :description "Coding-focused Kimi model, stronger on long-horizon repo work with less overthinking"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "image/bmp" "image/heic" "image/heif")
+     :context-window 262
+     :input-cost 0.95
+     :output-cost 4)
+    (qwen3.8-max
+     :description "2.4-trillion-parameter multimodal flagship for coding, professional work, and long-horizon agentic workflows"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/bmp" "image/jpeg" "image/png" "image/tiff" "image/webp" "image/heic")
+     :context-window 1000
+     :input-cost 2
+     :output-cost 6)
+    (qwen3.8-flash
+     :description "Qwen vision-language model for visual reasoning, documents, and agent tasks"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/bmp" "image/jpeg" "image/png" "image/tiff" "image/webp" "image/heic")
+     :context-window 1000
+     :input-cost 0.15
+     :output-cost 0.47)
+    (qwen3.7-plus
+     :description "Multimodal reasoning model for visual analysis, planning, and tool use"
+     :capabilities (media tool-use reasoning)
+     :mime-types
+     ("image/bmp" "image/jpeg" "image/png" "image/tiff" "image/webp" "image/heic")
+     :context-window 1000
+     :input-cost 0.4
+     :output-cost 1.6)
+    (minimax-m3.1-flash
+     :description "Frontier multimodal coding model with 1M context window and tunable thinking depth"
+     :capabilities (media tool-use reasoning)
+     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
+     :context-window 1000
+     :input-cost 0.15
+     :output-cost 0.6)
+    (minimax-m3
+     :description "MiniMax multimodal coding model for long-context reasoning and agent tasks"
+     :capabilities (media tool-use reasoning)
+     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
+     :context-window 1000
+     :input-cost 0.3
+     :output-cost 1.2)
+    (mimo-v2.6-pro
+     :description "Stronger MiMo Pro tier for multimodal reasoning and coding-agent execution"
+     :capabilities (media tool-use reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "image/bmp")
+     :context-window 1024
+     :input-cost 0.435
+     :output-cost 0.87)
+    (mimo-v2.6-flash
+     :description "MiMo Flash model for multimodal coding agents and long-context automation"
+     :capabilities (media tool-use reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "image/bmp")
+     :context-window 1024
+     :input-cost 0.14
+     :output-cost 0.28)
+    (grok-4.7
+     :description "xAI's frontier model for long-running agents, coding, knowledge work, and visual projects"
+     :capabilities (media tool-use json reasoning)
+     :mime-types ("image/jpeg" "image/png" "application/pdf")
+     :context-window 500
+     :input-cost 2
+     :output-cost 6)
+    (gpt-6-luna
+     :description "OpenAI's most efficient model for focused, high-volume tasks"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
+     :context-window 1050
+     :input-cost 0.1
+     :output-cost 0.5)
+    (gpt-5.6-luna
+     :description "Cost-efficient GPT-5.6 model for fast, high-volume workloads"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
+     :context-window 1050
+     :input-cost 0.2
+     :output-cost 1.2)
+    (claude-haiku-5-5
+     :description "Fast Claude model for responsive assistance, classification, and lightweight agents"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
+     :context-window 1000
+     :input-cost 0.1
+     :output-cost 0.5)
+    (gemini-4-argon
+     :description "Google's flagship reasoning model for complex software engineering, deep math and science, and long-horizon autonomous agents"
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif" "application/pdf")
+     :context-window 1024
+     :input-cost 2
+     :output-cost 10)
+    (hy4-preview
+     :description "A next-generation productivity model with significantly enhanced Agent and complex task execution capabilities."
+     :capabilities (tool-use reasoning)
+     :context-window 1024
+     :input-cost 0.834
+     :output-cost 2.501)
+    (hy3
+     :description "Tencent Hy reasoning model for coding, instruction following, and agent tasks"
+     :capabilities (tool-use reasoning)
+     :context-window 256
+     :input-cost 0.14
+     :output-cost 0.58)
+    (longcat-2.0
+     :description "Meituan LongCat-2.0, a reasoning model with tool calling and a 1M-token context window"
+     :capabilities (tool-use reasoning)
+     :context-window 1000
+     :input-cost 0.3
+     :output-cost 1.2)
+    (step-5-preview
+     :description "StepFun's next-generation flagship base model for coding and professional knowledge work, with native text, image, and video input and a 1M-token context window"
+     :capabilities (media tool-use json reasoning)
+     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
+     :context-window 1000
+     :input-cost 1
+     :output-cost 2.7)
+    (muse-spark-1.3-contributor
+     :description "Muse Spark 1.3 is a multimodal reasoning model from Meta for coding and agentic workflows."
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
+     :context-window 1024
+     :input-cost 0.1
+     :output-cost 0.2)
+    (muse-spark-1.2-contributor
+     :description "Muse Spark 1.2 is a coding-focused update to Muse Spark 1.1 with improvements in code generation, complex debugging, codebase understanding, and end-to-end developer workflows."
+     :capabilities (media tool-use json reasoning)
+     :mime-types
+     ("image/jpeg" "image/png" "image/gif" "image/webp" "application/pdf")
+     :context-window 1024
+     :input-cost 0.1
+     :output-cost 0.2)
+    (beam-free
+     :description "Sparse mixture-of-experts reasoning model with 23B active parameters for coding and agentic workflows"
+     :capabilities (tool-use json reasoning)
+     :context-window 1024
+     :input-cost 0
+     :output-cost 0)
+    (iceman-contributor-free
+     :description "Stealth model, free for a limited time"
+     :capabilities (tool-use reasoning)
+     :context-window 262
+     :input-cost 0
+     :output-cost 0))
+  "List of models available through OpenCode Go.
+
+Each model symbol is associated with the following keys, all
+optional:
+
+- `:description': a brief description of the model.
+
+- `:capabilities': a list of capabilities supported by the model.
+
+- `:mime-types': a list of supported MIME types for media files.
+
+- `:context-window': the context window size, in thousands of tokens.
+
+- `:input-cost': the input cost, in US dollars per million tokens.
+
+- `:output-cost': the output cost, in US dollars per million tokens.
+
+The OpenCode Go model list changes frequently.  Information about
+the models was obtained from the API:
+
+- <https://opencode.ai/docs/go>")
+
+;;;###autoload
+(cl-defun gptel-make-opencode
+    (name &key curl-args stream key request-params
+          (header #'gptel--opencode-header)
+          (host "opencode.ai")
+          (protocol "https")
+          (endpoint "/inference/go/openai/v1/chat/completions")
+          (models gptel--opencode-models))
+  "Register an OpenCode Go backend for gptel with NAME.
+
+OpenCode Go is a subscription plan for coding models served by
+OpenCode at <https://opencode.ai/docs/go>.  Requests are sent to
+the OpenAI-compatible endpoint, with the additional headers that
+OpenCode Go requires (see `gptel--opencode-header').
+
+Keyword arguments:
+
+KEY is a variable whose value is the API key, or function that
+returns the key.
+
+STREAM is a boolean to toggle streaming responses, defaults to
+false.
+
+The remaining keyword arguments (CURL-ARGS, REQUEST-PARAMS,
+HEADER, HOST, PROTOCOL, ENDPOINT and MODELS) are optional; for
+their meanings see `gptel-make-openai'."
+  (declare (indent 1))
+  (let ((backend (gptel--make-opencode
                   :name name
                   :host host
                   :header header

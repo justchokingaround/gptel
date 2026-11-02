@@ -35,6 +35,11 @@
 - xAI backend: Add support for =grok-4.7=, =grok-4.6=, =grok-4.20=,
   =grok-4.20-non-reasoning= and =grok-4.20-multi-agent=.
 
+- Add an OpenCode Go backend, =gptel-make-opencode=.  It sends the
+  client and per-conversation session headers that OpenCode Go
+  requires, and defaults to the models available with a Go
+  subscription.
+
 ** New features and UI changes
 ** Notable bug fixes
 
